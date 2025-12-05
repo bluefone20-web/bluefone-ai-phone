@@ -1,8 +1,7 @@
 // =============================================
 // Bluefone AI – Whisper + GPT Call Assistant
-// - Whisper(STT)로 통화 녹음 인식
-// - GPT로 답변 생성
-// - Twilio Neural Voice로 자연스럽게 읽기
+// - Twilio Recording → Whisper(STT) → GPT 답변
+// - Twilio Neural Voice로 자연스럽게 읽어줌
 // =============================================
 require("dotenv").config();
 const express = require("express");
@@ -12,7 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const OpenAI = require("openai");
 
-// ===== Basic init =====
+// ===== 기본 초기화 =====
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
@@ -29,7 +28,7 @@ const STAFF_MOBILE = process.env.STAFF_MOBILE || "";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN;
 
-// ===== Business hours (Brisbane) =====
+// ===== 영업시간 (브리즈번 기준 08:00 ~ 17:30) =====
 function isBotActiveNow() {
   const now = new Date();
   const brisbaneHour = (now.getUTCHours() + 10) % 24;
@@ -40,7 +39,7 @@ function isBotActiveNow() {
   return !(after1730 || before0800);
 }
 
-// ===== PRICE TABLE / CSV 로직 (있으면 그대로 활용, 없어도 동작) =====
+// ===== PRICE TABLE / CSV 로직 (있으면 쓰고, 없어도 동작) =====
 const PRICE_TABLE = {
   screen: { priceRange: [150, 280], timeRange: [30, 60], difficulty: 3 },
   battery: { priceRange: [60, 120], timeRange: [20, 40], difficulty: 2 },
@@ -181,13 +180,14 @@ function describeCategory(catKey) {
   };
 }
 
-// ===== GPT reply 로직 (이전 코드 유지, STT만 Whisper로 바뀜) =====
+// ===== GPT 답변 생성 =====
 async function generateReply(userText) {
   const brand = detectBrand(userText);
   const cat = detectCategory(userText);
   const priceRow = findBestPrice(userText, brand);
   const info = cat ? describeCategory(cat) : null;
 
+  // 브랜드/이슈별 빠른 룰
   if (brand === "xiaomi" || brand === "google") {
     return `
 We currently do not provide repair services for Xiaomi or Google Pixel devices.
@@ -197,8 +197,8 @@ If you would like general advice, you are welcome to bring the phone in and we c
 
   if (isPowerIssue(userText)) {
     return `
-If the phone does not power on, sometimes it is still caused by simpler issues like the battery or screen rather than the mainboard.
-To know for sure, we need to test the device in-store, which usually takes about 10 to 20 minutes.
+If the phone does not power on, it might still be a battery or screen problem rather than the mainboard.
+We need to test it in-store, which usually takes about 10 to 20 minutes.
 Please feel free to visit the shop and we will check it for you.
     `.trim();
   }
@@ -206,29 +206,26 @@ Please feel free to visit the shop and we will check it for you.
   if (cat === "charge") {
     return `
 Charging problems are often caused by dust or debris inside the charging port.
-In many cases, a charging port cleaning can fix the issue, and this service is 20 AUD.
-
-If, after cleaning, we confirm physical damage on the port itself, we do not perform charging port hardware repairs.
-You are welcome to bring the phone in so we can clean the port and check whether it can be fixed that way.
+In many cases, a port cleaning for 20 AUD can fix the issue.
+If we confirm physical damage on the port itself, we do not perform charging port hardware repairs.
     `.trim();
   }
 
   if (brand === "other") {
     return `
 For this brand, repair prices can vary a lot depending on the exact model.
-If you can tell us the exact model name, we can give you a better estimate.
-If you are not sure of the model, just bringing the phone into the shop is perfectly fine and we can identify it and advise you in person.
+If you can tell us the exact model name, we can give a better estimate, or you can simply bring the phone in and we will identify it for you.
     `.trim();
   }
 
   if (brand === "unknown" && !priceRow) {
     return `
 Could you please tell us which brand and model your phone is?
-If you are not sure, you can simply bring the device into the shop and we will identify it and advise you directly.
+If you are not sure, you can bring the device into the shop and we will identify it and advise you directly.
     `.trim();
   }
 
-  // GPT로 톤/구성 미세 조정
+  // GPT로 톤/구성 정리
   const systemPrompt = `
 You are the AI call assistant for "${SHOP_NAME}", a mobile phone repair shop in Australia.
 You MUST ALWAYS reply in English only, as if speaking on the phone.
@@ -269,43 +266,50 @@ ${info ? JSON.stringify(info) : "null"}
 
 // ===== Whisper STT: Twilio Recording 다운로드 → OpenAI 전송 =====
 async function transcribeRecording(recordingUrl) {
-  // Twilio Recording URL에서 음성 다운로드
-  // Twilio는 Basic Auth 필요
-  const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+  // Twilio Recording URL 확장자 보정 (.wav 붙이기)
+  const finalUrl = recordingUrl.endsWith(".wav") ? recordingUrl : recordingUrl + ".wav";
+  console.log("Recording URL:", finalUrl);
 
-  const res = await fetch(recordingUrl, {
-    headers: {
-      Authorization: `Basic ${auth}`,
-    },
+  // Twilio Basic Auth (SID:TOKEN)
+  const authHeader =
+    "Basic " +
+    Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+
+  const audioRes = await fetch(finalUrl, {
+    headers: { Authorization: authHeader },
   });
 
-  if (!res.ok) {
-    throw new Error("Failed to download recording from Twilio: " + res.status);
+  if (!audioRes.ok) {
+    const bodyText = await audioRes.text().catch(() => "");
+    throw new Error(
+      "Twilio download failed -> " + audioRes.status + " " + bodyText
+    );
   }
 
-  const arrayBuffer = await res.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
+  const buffer = Buffer.from(await audioRes.arrayBuffer());
 
-  const tmpDir = path.join(__dirname, "tmp");
-  if (!fs.existsSync(tmpDir)) {
-    fs.mkdirSync(tmpDir);
-  }
-  const filePath = path.join(tmpDir, `call_${Date.now()}.wav`);
-  fs.writeFileSync(filePath, buffer);
+  // Render같은 환경에서는 /tmp 사용
+  const tmpFile = path.join("/tmp", `call_${Date.now()}.wav`);
+  fs.writeFileSync(tmpFile, buffer);
+  console.log("Saved temp audio:", tmpFile);
 
-  // Whisper(또는 gpt-4o-mini-transcribe)로 음성 → 텍스트
-  const transcription = await openai.audio.transcriptions.create({
-    file: fs.createReadStream(filePath),
-    model: "gpt-4o-mini-transcribe", // 또는 "whisper-1"
-    // language: "en", // 한국어+영어 섞어 말해도 잘 잡힘
+  // Whisper STT (한국어+영어 섞인 발음 최적화)
+  const result = await openai.audio.transcriptions.create({
+    file: fs.createReadStream(tmpFile),
+    model: "whisper-1",
+    language: "ko", // 한국어 우선 (영어 모델명도 같이 잘 잡음)
+    prompt:
+      "Caller is describing mobile phone repair issues, mixing Korean and English, with model names like iPhone, Samsung, Galaxy, screen cracked, not charging, battery problem, water damage, etc.",
   });
 
-  // 임시 파일 삭제 (선택)
   try {
-    fs.unlinkSync(filePath);
-  } catch (e) {}
+    fs.unlinkSync(tmpFile);
+  } catch (e) {
+    console.warn("Failed to delete temp audio:", e.message);
+  }
 
-  return transcription.text.trim();
+  console.log("Whisper raw text:", result.text);
+  return (result.text || "").trim();
 }
 
 // ===== Health check =====
@@ -319,7 +323,7 @@ app.post("/webhook", async (req, res) => {
   const from = req.body.From || "";
 
   try {
-    // 0) 와이프 번호면 바로 연결
+    // 와이프 번호면 바로 연결
     if (WIFE_NUMBER && OWNER_MOBILE && from === WIFE_NUMBER) {
       twiml.say(
         { voice: "neural:woman", language: "en-AU" },
@@ -330,7 +334,7 @@ app.post("/webhook", async (req, res) => {
       return res.send(twiml.toString());
     }
 
-    // 1) 영업시간 아닐 때 → 바로 사람에게
+    // 영업시간 아니면 바로 사람에게 연결
     if (!isBotActiveNow()) {
       if (OWNER_MOBILE) {
         twiml.say(
@@ -349,19 +353,19 @@ app.post("/webhook", async (req, res) => {
       return res.send(twiml.toString());
     }
 
-    // 2) Whisper 기반: 안내 + 통화 녹음
+    // Whisper 기반: 안내 + 통화 녹음
     twiml.say(
       { voice: "neural:woman", language: "en-AU" },
-      `Hello, this is ${SHOP_NAME}. After the beep, please clearly tell me your phone model and the issue. For example, iPhone 13 screen cracked, or Samsung not charging.`
+      `Hello, this is ${SHOP_NAME}. After the beep, please clearly tell me your phone model and the issue. For example, "iPhone 13 screen cracked" or "Samsung not charging".`
     );
 
-    // 통화 일부분 녹음 → /process-recording 으로 POST
+    // 통화 녹음 후 /process-recording 으로 전송
     twiml.record({
       action: "/process-recording",
       method: "POST",
-      maxLength: 15, // 15초까지 듣고 잘라서 보냄
+      maxLength: 20,        // 최대 20초 말 듣기
       playBeep: true,
-      trim: "trim-silence",
+      trim: "do-not-trim",  // 침묵도 자르지 말고 그대로 보내기
     });
 
     res.type("text/xml");
@@ -378,13 +382,14 @@ app.post("/webhook", async (req, res) => {
   }
 });
 
-// ===== /process-recording: Whisper로 인식 → GPT 답변 후 읽어주기 =====
+// ===== /process-recording: Whisper로 인식 → GPT 답변 후 읽기 =====
 app.post("/process-recording", async (req, res) => {
   const twiml = new twilio.twiml.VoiceResponse();
-  const recordingUrl = req.body.RecordingUrl; // Twilio가 보내줌
+  const recordingUrl = req.body.RecordingUrl;
 
   try {
     if (!recordingUrl) {
+      console.error("No RecordingUrl in request body");
       twiml.say(
         { voice: "neural:woman", language: "en-AU" },
         "Sorry, I did not get your voice clearly. Please call us again."
@@ -394,17 +399,27 @@ app.post("/process-recording", async (req, res) => {
       return res.send(twiml.toString());
     }
 
-    console.log("Recording URL:", recordingUrl);
+    console.log("Raw RecordingUrl:", recordingUrl);
 
-    // 1) Whisper로 음성 → 텍스트
+    // 1) Whisper STT
     const text = await transcribeRecording(recordingUrl);
     console.log("Transcription:", text);
 
-    // 2) GPT로 답변 생성
+    if (!text) {
+      twiml.say(
+        { voice: "neural:woman", language: "en-AU" },
+        "Sorry, I could not hear your message clearly. Please call us again and speak a little slower."
+      );
+      twiml.hangup();
+      res.type("text/xml");
+      return res.send(twiml.toString());
+    }
+
+    // 2) GPT 답변 생성
     const reply = await generateReply(text);
     console.log("GPT Reply:", reply);
 
-    // 3) Twilio Neural Voice로 읽기
+    // 3) Neural Voice로 읽어줌
     twiml.say({ voice: "neural:woman", language: "en-AU" }, reply);
     twiml.say(
       { voice: "neural:woman", language: "en-AU" },
