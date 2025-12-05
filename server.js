@@ -5,462 +5,210 @@ const bodyParser = require("body-parser");
 const twilio = require("twilio");
 const OpenAI = require("openai");
 
-// Node 18+ 에서는 fetch가 내장되어 있음
+// Node 18+ 에서는 fetch 내장
 const app = express();
 app.use(bodyParser.urlencoded({ extended: false }));
 
 const openai = new OpenAI({
- apiKey: process.env.OPENAI_API_KEY,
+apiKey: process.env.OPENAI_API_KEY,
 });
 
 const SHOP_NAME = process.env.SHOP_NAME || "Bluefone Mobile Repair";
 
 // ===== Whitelist numbers =====
-// 예시: "+61412345678" (Twilio 로그에 찍히는 형식 그대로)
-const WIFE_NUMBER = process.env.WIFE_NUMBER || ""; // e.g. "+614XXXXXXXX"
-const OWNER_MOBILE = process.env.OWNER_MOBILE || ""; // e.g. "+614YYYYYYYY"
+const WIFE_NUMBER = process.env.WIFE_NUMBER || "";
+const OWNER_MOBILE = process.env.OWNER_MOBILE || "";
+const STAFF_MOBILE = process.env.STAFF_MOBILE || "";
 
-// ===== Business hours (Brisbane time) =====
-// AI 봇 작동 시간: 08:00 ~ 17:30 (브리즈번 기준)
+// ===== Business Hours (Brisbane) =====
 function isBotActiveNow() {
- const now = new Date();
-
- // 서버 시간(UTC) → 브리즈번(UTC+10)으로 변환
- const brisbaneHour = (now.getUTCHours() + 10) % 24;
- const minute = now.getUTCMinutes();
-
- const after1730 = brisbaneHour > 17 || (brisbaneHour === 17 && minute > 30);
- const before0800 = brisbaneHour < 8;
-
- if (after1730 || before0800) {
- return false; // 봇 OFF
- }
- return true; // 08:00 ~ 17:30 사이 봇 ON
+const now = new Date();
+const brisbaneHour = (now.getUTCHours() + 10) % 24;
+const minute = now.getUTCMinutes();
+return !(brisbaneHour < 8 || (brisbaneHour > 17 || (brisbaneHour === 17 && minute > 30)));
 }
 
-// ===== Fallback PRICE TABLE (rough ranges) =====
-const PRICE_TABLE = {
- screen: {
- name: "Screen replacement",
- priceRange: [150, 280],
- timeRange: [30, 60],
- difficulty: 3,
- },
- battery: {
- name: "Battery replacement",
- priceRange: [60, 120],
- timeRange: [20, 40],
- difficulty: 2,
- },
- charge: {
- name: "Charging-related issue",
- priceRange: [50, 120],
- timeRange: [20, 60],
- difficulty: 3,
- },
- water: {
- name: "Water damage check/clean",
- priceRange: [80, 220],
- timeRange: [60, 120],
- difficulty: 4,
- },
- backglass: {
- name: "Back glass replacement",
- priceRange: [150, 260],
- timeRange: [90, 180],
- difficulty: 4,
- },
+// ===== CSV Price Table =====
+let PRICE_DATA = [];
+function parseCsv(text) {
+const lines = text.trim().split(/\r?\n/);
+if (lines.length < 2) return [];
+
+const [header, ...rows] = lines;
+const heads = header.split(",").map(h => h.trim().toLowerCase());
+
+return rows.map(row => {
+const cols = row.split(",");
+const obj = {};
+heads.forEach((h,i)=> obj[h] = cols[i]?.trim() || "");
+obj.price = Number((obj.price||"").replace(/[^0-9.]/g,""));
+return obj;
+}).filter(o => o.model && o.price>0);
+}
+
+async function loadPriceData() {
+try {
+const r = await fetch(process.env.PRICE_SHEET_URL);
+const t = await r.text();
+PRICE_DATA = parseCsv(t);
+console.log(`Loaded ${PRICE_DATA.length} rows`);
+} catch(e){
+console.error("CSV LOAD FAIL:",e);
+}
+}
+
+function normalize(s=""){
+return s.toLowerCase()
+.replace(/iphone|ipad|galaxy|samsung|apple/gi,"")
+.replace(/\s+/g," ").trim();
+}
+
+function detectBrand(t=""){
+t=t.toLowerCase();
+if(t.includes("iphone")||t.includes("ios")||t.includes("apple")||t.includes("ipad")) return "apple";
+if(t.includes("samsung")||t.includes("galaxy")) return "samsung";
+if(t.includes("xiaomi")||t.includes("redmi")||t.includes("poco")||t.includes("샤오미")) return "xiaomi";
+if(t.includes("pixel")||t.includes("google")) return "google";
+if(/oppo|vivo|motorola|moto|nokia|nothing|zte|sony|htc/i.test(t)) return "other";
+return "unknown";
+}
+
+function detectCategory(t=""){
+t=t.toLowerCase();
+if(/screen|display|lcd|crack|smashed|glass/.test(t)) return "screen";
+if(/battery|drain|swollen|shuts off/.test(t)) return "battery";
+if(/charge|charging|charger|port|cable/.test(t)) return "charge";
+if(/water|liquid|wet|dropped in/.test(t)) return "water";
+if(/back glass|backglass|back cover|back.*crack/.test(t)) return "backglass";
+return null;
+}
+
+function isPowerIssue(t=""){
+t=t.toLowerCase();
+return /(no power|not turning on|won't turn on|doesn't turn on|power issue|won t turn on|black screen)|(부팅 안|전원 안|안 켜|켜지지)/.test(t);
+}
+
+// fallback price table
+const PRICE_TABLE={
+screen:{priceRange:[150,280],timeRange:[30,60],difficulty:3},
+battery:{priceRange:[60,120],timeRange:[20,40],difficulty:2},
+charge:{priceRange:[50,120],timeRange:[20,60],difficulty:3},
+water:{priceRange:[80,220],timeRange:[60,120],difficulty:4},
+backglass:{priceRange:[150,260],timeRange:[90,180],difficulty:4}
 };
 
-// ===== CSV Price Data (from Google Sheet) =====
-// 기대 CSV 헤더: Brand,DeviceType,Model,Variant,RepairType,Price
-let PRICE_DATA = [];
-
-// --- CSV 문자열을 JSON 배열로 변환 ---
-function parseCsv(text) {
- const lines = text.trim().split(/\r?\n/);
- if (lines.length < 2) return [];
-
- const [headerLine, ...rows] = lines;
- const headers = headerLine.split(",").map((h) => h.trim().toLowerCase());
-
- const result = rows
- .map((line) => line.split(","))
- .filter((cols) => cols.length >= 2)
- .map((cols) => {
- const obj = {};
- headers.forEach((h, idx) => {
- obj[h] = cols[idx] ? cols[idx].trim() : "";
- });
- if (obj.price) {
- obj.price = Number(String(obj.price).replace(/[^0-9.]/g, ""));
- } else {
- obj.price = 0;
- }
- return obj;
- })
- .filter((obj) => !!obj.model && obj.price > 0);
-
- return result;
+function describeCategory(cat){
+const c=PRICE_TABLE[cat]; if(!c) return null;
+return {
+price:`about ${c.priceRange[0]}–${c.priceRange[1]} AUD`,
+time:`around ${c.timeRange[0]}–${c.timeRange[1]} minutes`,
+diff: c.difficulty>=4 ? "more complex repair" : "moderate difficulty"
+};
 }
 
-// --- Google Sheet (CSV)에서 가격 정보 로딩 ---
-async function loadPriceData() {
- const url = process.env.PRICE_SHEET_URL;
- if (!url) {
- console.warn("PRICE_SHEET_URL is not set in .env");
- return;
- }
- try {
- const res = await fetch(url);
- const text = await res.text();
- PRICE_DATA = parseCsv(text);
- console.log(`Loaded ${PRICE_DATA.length} price rows from sheet.`);
- } catch (err) {
- console.error("Failed to load price data:", err);
- }
+function findBestPrice(text,brand){
+const norm=normalize(text);
+let cand=PRICE_DATA.filter(r=>{
+if(brand==="apple"&&!r.brand.toLowerCase().includes("apple"))return false;
+if(brand==="samsung"&&!r.brand.toLowerCase().includes("samsung"))return false;
+return true;
+});
+
+let best=null,score=0;
+cand.forEach(r=>{
+const n=normalize(r.model);
+if(norm.includes(n)&&n.length>score){score=n.length;best=r;}
+});
+return best;
 }
 
-// --- normalize 함수: 비교용 문자열 정리 ---
-function normalize(str = "") {
- return str
- .toLowerCase()
- .replace(/iphone/g, "")
- .replace(/ipad/g, "")
- .replace(/galaxy/g, "")
- .replace(/samsung/g, "")
- .replace(/apple/g, "")
- .replace(/\s+/g, " ")
- .trim();
-}
+// ===== GPT response =====
+async function generateReply(input){
+const brand=detectBrand(input);
+const cat=detectCategory(input);
+const row=findBestPrice(input,brand);
+const info=cat?describeCategory(cat):null;
 
-// --- 손님이 말한 내용 + 브랜드 힌트로 가격 행 찾기 ---
-function findBestPrice(userText, brandHint) {
- if (!PRICE_DATA.length) return null;
+if(brand==="xiaomi"||brand==="google")
+return `We currently do not repair Xiaomi or Google Pixel devices. You may bring it in for a quick check.`;
 
- const normUser = normalize(userText);
+if(isPowerIssue(input))
+return `If the device won't power on, it may still be a battery or screen problem instead of the mainboard. We can test it in-store in about 10–20 minutes.`;
 
- const candidates = PRICE_DATA.filter((row) => {
- const b = (row.brand || "").toLowerCase();
- if (brandHint === "apple" && !b.includes("apple")) return false;
- if (brandHint === "samsung" && !b.includes("samsung")) return false;
- // 다른 브랜드는 일단 전체 허용
- return true;
- });
+if(cat==="charge")
+return `Charging issues are often fixed with a port cleaning for 20 AUD. If we find hardware damage, we do not perform charging port repairs.`;
 
- let best = null;
- let bestScore = 0;
+if(brand==="other")
+return `Repair price varies by model. If you tell us the exact model, we can estimate more accurately.`;
 
- for (const row of candidates) {
- const normModel = normalize(row.model || "");
- if (!normModel) continue;
+if(brand==="unknown"&&!row)
+return `Could you tell me the brand and model? If unsure, bring it in and we will check it for you.`;
 
- if (normUser.includes(normModel)) {
- const score = normModel.length; // 길이 기반 간단 스코어
- if (score > bestScore) {
- bestScore = score;
- best = row;
- }
- }
- }
+if(row) return `The repair for ${row.model} is around ${row.price} AUD. Final cost may vary after inspection.`;
 
- return best; // {brand, devicetype, model, variant, repairtype, price}
-}
+if(info) return `Estimated cost is ${info.price}. It usually takes ${info.time}. Final quote depends on inspection.`;
 
-// ===== Brand detection =====
-function detectBrand(text = "") {
- const t = text.toLowerCase();
-
- if (t.includes("iphone") || t.includes("ios") || t.includes("apple") || t.includes("ipad"))
- return "apple";
-
- if (t.includes("samsung") || t.includes("galaxy")) return "samsung";
-
- if (t.includes("xiaomi") || t.includes("redmi") || t.includes("poco") || t.includes("샤오미"))
- return "xiaomi";
-
- if (t.includes("pixel") || t.includes("google")) return "google";
-
- if (
- t.includes("oppo") ||
- t.includes("vivo") ||
- t.includes("motorola") ||
- t.includes("moto") ||
- t.includes("nokia") ||
- t.includes("nothing") ||
- t.includes("zte") ||
- t.includes("sony") ||
- t.includes("htc")
- )
- return "other";
-
- return "unknown";
-}
-
-// ===== Category detection (screen/battery/charge/water/backglass) =====
-function detectCategory(text = "") {
- const t = text.toLowerCase();
-
- if (
- t.includes("screen") ||
- t.includes("display") ||
- t.includes("lcd") ||
- t.includes("crack") ||
- t.includes("smashed") ||
- t.includes("glass")
- )
- return "screen";
-
- if (t.includes("battery") || t.includes("drain") || t.includes("swollen") || t.includes("shuts off"))
- return "battery";
-
- if (
- t.includes("charge") ||
- t.includes("charging") ||
- t.includes("charger") ||
- t.includes("port") ||
- t.includes("cable")
- )
- return "charge";
-
- if (t.includes("water") || t.includes("liquid") || t.includes("wet") || t.includes("dropped in"))
- return "water";
-
- if (
- t.includes("back glass") ||
- t.includes("backglass") ||
- t.includes("back cover") ||
- (t.includes("back") && t.includes("crack"))
- )
- return "backglass";
-
- return null;
-}
-
-// ===== Power issue detection =====
-function isPowerIssue(text = "") {
- const t = text.toLowerCase();
- return (
- t.includes("no power") ||
- t.includes("not turning on") ||
- t.includes("won't turn on") ||
- t.includes("doesn't turn on") ||
- t.includes("power issue") ||
- t.includes("won t turn on") ||
- t.includes("black screen with no power") ||
- t.includes("부팅 안") ||
- t.includes("전원 안") ||
- t.includes("안 켜져") ||
- t.includes("켜지지")
- );
-}
-
-// ===== Category fallback description =====
-function describeCategory(catKey) {
- const cat = PRICE_TABLE[catKey];
- if (!cat) return null;
-
- const [pMin, pMax] = cat.priceRange;
- const [tMin, tMax] = cat.timeRange;
-
- return {
- priceText: `Typical price range is about ${pMin} to ${pMax} AUD.`,
- timeText: `Estimated turnaround time is around ${tMin} to ${tMax} minutes.`,
- difficultyText:
- cat.difficulty >= 4
- ? "The repair is a bit more complex and can sometimes take longer depending on the condition."
- : "The repair difficulty is moderate in most cases.",
- };
-}
-
-// ===== GPT reply =====
-async function generateReply(userText) {
- const brand = detectBrand(userText);
- const cat = detectCategory(userText);
- const priceRow = findBestPrice(userText, brand);
- const info = cat ? describeCategory(cat) : null;
-
- // 1) Xiaomi / Google Pixel → 수리 안 한다
- if (brand === "xiaomi" || brand === "google") {
- return `
-We currently do not provide repair services for Xiaomi or Google Pixel devices.
-If you would like general advice, you are welcome to bring the phone in and we can at least take a quick look for you.
- `.trim();
- }
-
- // 2) Power issue
- if (isPowerIssue(userText)) {
- return `
-If the phone does not power on, sometimes it is still caused by simpler issues like the battery or screen rather than the mainboard.
-To know for sure, we need to test the device in-store, which usually takes about 10 to 20 minutes.
-Please feel free to visit the shop and we will check it for you.
- `.trim();
- }
-
- // 3) Charging issue → port cleaning 20 AUD, 포트 데미지면 수리 안 함
- if (cat === "charge") {
- return `
-Charging problems are often caused by dust or debris inside the charging port.
-In many cases, a charging port cleaning can fix the issue, and this service is 20 AUD.
-
-If, after cleaning, we confirm physical damage on the port itself, we do not perform charging port hardware repairs.
-You are welcome to bring the phone in so we can clean the port and check whether it can be fixed that way.
- `.trim();
- }
-
- // 4) Other brand (OPPO, Vivo 등)
- if (brand === "other") {
- return `
-For this brand, repair prices can vary a lot depending on the exact model.
-If you can tell us the exact model name, we can give you a better estimate.
-If you are not sure of the model, just bringing the phone into the shop is perfectly fine and we can identify it and advise you in person.
- `.trim();
- }
-
- // 5) 브랜드를 아예 모르면 먼저 브랜드/모델부터
- if (brand === "unknown" && !priceRow) {
- return `
-Could you please tell us which brand and model your phone is?
-If you are not sure, you can simply bring the device into the shop and we will identify it and advise you directly.
- `.trim();
- }
-
- const systemPrompt = `
-You are the AI call assistant for "${SHOP_NAME}", a mobile phone repair shop in Australia.
-You MUST ALWAYS reply in English only.
-
-Rules:
-- Be friendly, concise, and clear.
-- Use 2–3 short sentences.
-- Never promise mainboard / motherboard repair. Do NOT say "we repair mainboards".
-- If an exact price row is provided, use that price for the quote (e.g., "around 190 AUD").
-- If only a category range is provided, speak in ranges like "about X to Y AUD".
-- Always remind that phone estimates can change after inspection in-store.
-- Encourage the customer to visit the shop for a proper inspection.
- `;
-
- const userPrompt = `
-Customer said: "${userText}".
-
-Detected brand: ${brand}
-Detected category: ${cat}
-
-Exact price row from CSV (may be null):
-${priceRow ? JSON.stringify(priceRow) : "null"}
-
-Category-level fallback info (may be null):
-${info ? JSON.stringify(info) : "null"}
-
-If priceRow is not null:
-- Use priceRow.price as the main quote.
-- You may mention it as "around ${priceRow ? priceRow.price : ""} AUD".
-
-If priceRow is null but category info exists:
-- Use the price range from category info to give a rough estimate.
-
-Respond in English only, 2–3 sentences.
- `;
-
- const completion = await openai.chat.completions.create({
- model: "gpt-4o-mini",
- messages: [
- { role: "system", content: systemPrompt },
- { role: "user", content: userPrompt },
- ],
- });
-
- return completion.choices[0].message.content.trim();
+return `We can assist once we know the exact model and issue. Feel free to bring the device in for a check.`;
 }
 
 // ===== Health check =====
-app.get("/", (req, res) => {
- res.send(
- "Bluefone AI Phone Assistant (English-only, CSV price + whitelist + business hours) is running."
- );
+app.get("/",(_,res)=>res.send("Bluefone AI Phone Assistant - Neural Voice Active"));
+
+// ===== Webhook =====
+app.post("/webhook", async (req,res)=>{
+const twiml = new twilio.twiml.VoiceResponse();
+const from=req.body.From||"";
+const speech=req.body.SpeechResult;
+
+try{
+
+// Wife bypass → connect direct
+if(from===WIFE_NUMBER){
+twiml.say({voice:"neural:woman"},"Hi, connecting your call now.");
+twiml.dial(OWNER_MOBILE);
+return res.type("text/xml").send(twiml.toString());
+}
+
+// Bot OFF → forward to owner
+if(!isBotActiveNow()){
+twiml.say({voice:"neural:woman"},"Our AI is currently offline. Forwarding you now.");
+twiml.dial(OWNER_MOBILE);
+return res.type("text/xml").send(twiml.toString());
+}
+
+// First entry → ask for issue
+if(!speech){
+const g=twiml.gather({
+input:"speech",
+action:"/webhook",
+method:"POST",
+speechTimeout:"auto"
 });
 
-// ===== Twilio Voice Webhook =====
-app.post("/webhook", async (req, res) => {
- const twiml = new twilio.twiml.VoiceResponse();
- const from = req.body.From || "";
- const speech = req.body.SpeechResult;
+g.say({voice:"neural:woman"},
+`Hello, this is ${SHOP_NAME}. Please tell me your phone model and the issue.`);
 
- try {
- // 1) Wife whitelist: 와이프 번호면 AI 건너뛰고 바로 너한테 연결
- if (WIFE_NUMBER && OWNER_MOBILE && from === WIFE_NUMBER) {
- twiml.say({ voice: "woman", language: "en-US" }, "Hi, I will connect your call now.");
- twiml.dial(OWNER_MOBILE);
- res.type("text/xml");
- return res.send(twiml.toString());
- }
+return res.type("text/xml").send(twiml.toString());
+}
 
- // 2) 영업시간 아닌 경우: AI 안 쓰고 바로 사람에게 연결
- if (!isBotActiveNow()) {
- if (OWNER_MOBILE) {
- twiml.say(
- { voice: "woman", language: "en-US" },
- "Our AI assistant is currently offline."
- );
- twiml.dial(OWNER_MOBILE);
- } else {
- twiml.say(
- { voice: "woman", language: "en-US" },
- "Our AI assistant is currently offline. Please call again during our business hours."
- );
- twiml.hangup();
- }
+// Generate reply from GPT
+const reply=await generateReply(speech);
 
- res.type("text/xml");
- return res.send(twiml.toString());
- }
+twiml.say({voice:"neural:woman"},reply);
+twiml.say({voice:"neural:woman"},"If you have more questions, you can visit our shop anytime. Thank you.");
+twiml.hangup();
+res.type("text/xml").send(twiml.toString());
 
- // 3) 첫 진입: 아직 음성 인식 결과가 없을 때 → 질문
- if (!speech) {
- const gather = twiml.gather({
- input: "speech",
- action: "/webhook",
- method: "POST",
- speechTimeout: "auto",
- });
-
- gather.say(
- { voice: "woman", language: "en-US" },
- `Hello, this is ${SHOP_NAME}.
-Prices we mention over the phone are only estimates and may change after we inspect the actual device in-store.
-Please tell me your phone model and what issue you are having.`
- );
-
- res.type("text/xml");
- return res.send(twiml.toString());
- }
-
- // 4) 손님이 말한 내용(speech)으로 AI 답변 생성
- const reply = await generateReply(speech);
-
- twiml.say({ voice: "woman", language: "en-US" }, reply);
- twiml.say(
- { voice: "woman", language: "en-US" },
- "If you have any other questions, you are always welcome to visit or contact us. Thank you."
- );
- twiml.hangup();
-
- res.type("text/xml");
- res.send(twiml.toString());
- } catch (err) {
- console.error("Error in /webhook:", err);
- twiml.say(
- { voice: "woman", language: "en-US" },
- "Sorry, there was an error on our system. Please call us again in a little while."
- );
- twiml.hangup();
- res.type("text/xml");
- res.send(twiml.toString());
- }
+} catch(e){
+console.error(e);
+twiml.say({voice:"neural:woman"},"Sorry, an error occurred. Please call again.");
+twiml.hangup();
+res.type("text/xml").send(twiml.toString());
+}
 });
 
-// ===== 서버 시작 시 가격 데이터 로딩 후 리스닝 =====
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
- console.log(`Bluefone AI Phone Assistant running on port ${port}`);
- loadPriceData(); // 서버 시작시 CSV 로딩
+// ===== Start server =====
+app.listen(process.env.PORT||3000,()=>{
+console.log("AI Phone Assistant with Neural Voice Running");
+loadPriceData();
 });
