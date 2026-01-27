@@ -1,0 +1,8 @@
+day,start,end,enabled
+Mon,09:00,17:30,TRUE
+Tue,09:00,17:30,TRUE
+Wed,09:00,17:30,TRUE
+Thu,09:00,20:00,TRUE
+Fri,09:00,17:30,TRUE
+Sat,09:00,16:00,TRUE
+Sun,10:00,15:30,TRUE

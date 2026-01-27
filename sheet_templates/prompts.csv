@@ -1,0 +1,12 @@
+key,text
+main_intro,Hello. Thank you for calling {STORE_NAME}. This call may be recorded for quality and training purposes.
+main_scope,We provide repairs for iPhone, Galaxy, and iPad only. For iPhone and Galaxy, we mainly repair screen, battery, and back glass. For other repair issues, please visit our shop for assessment. For iPad, we mainly repair digitizer, LCD screen, and battery. We sell cases and screen protectors for iPhone, iPad, Galaxy, and Galaxy Tablet only.
+menu_prompt,For repairs, press 1. For cases or screen protectors, press 2. For store hours and address, press 3.
+repair_prompt,Repairs. Please leave a short message with your device model and the problem. For example: iPhone 13 screen, Galaxy S22 battery, or iPad not charging. Final price and time may change after in store inspection. Start after the beep.
+accessory_prompt,Accessories. We stock cases and screen protectors for iPhone, iPad, Galaxy, and Galaxy Tablet only. Please leave a short message with your exact device model and what you need. Start after the beep.
+hours_prompt,Our store is located at {ADDRESS_LINE}. Our hours are {HOURS}. For other questions, please send us a text and we will reply when available.
+invalid_prompt,Sorry, that was not a valid selection. Please call again. For other questions, please send us a text and we will reply when available.
+no_input_prompt,Sorry, we did not receive your selection. Please call again. For other questions, please send us a text and we will reply when available.
+off_voicemail_prompt,Our phone system is currently turned off. Please leave a short message after the beep.
+off_hangup_prompt,Our phone system is currently turned off. Please send us a text and we will reply when available.
+after_record_thanks,Thank you. We will review your message and call you back.

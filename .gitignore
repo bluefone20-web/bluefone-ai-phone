@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+.venv
+env/
+venv/
+*.log
+.DS_Store
+
+# Credentials (never commit)
+credentials.json
+*.json.key
+service_account*.json
+gen-lang-client*.json
+
+# Temp files
+temp_*.wav
+temp_*.mp3
+
+# IDE
+.idea/
+.vscode/

@@ -1,0 +1,12 @@
+key,value,note
+tenant_id,bluefone_cannonhill,unique tenant id
+store_name,Bluefone,Cannon Hill location
+language,en,MVP english only
+email_recipients,"owner@email.com,staff@email.com",comma separated
+default_enabled,TRUE,fallback if schedule/manual fails
+manual_mode,TRUE,TRUE = manual override
+manual_enabled,TRUE,manual on/off when manual_mode=TRUE
+off_mode,voicemail,voicemail or hangup
+timezone,Australia/Brisbane,tenant timezone
+address_line,"Cannon Hill Kmart Plaza, Cannon Hill QLD 4170",update if needed
+hours_text,"Mon 9am–5:30pm, Tue 9am–5:30pm, Wed 9am–5:30pm, Thu 9am–8pm, Fri 9am–5:30pm, Sat 9am–4pm, Sun 10am–3:30pm",from Google listing
