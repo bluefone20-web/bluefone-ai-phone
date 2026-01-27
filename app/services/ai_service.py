@@ -6,12 +6,22 @@ import os
 
 logger = logging.getLogger(__name__)
 
-# Initialize client
-client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
+# Lazy client initialization (avoids error if API key not set at import time)
+_client = None
+
+def _get_client():
+    global _client
+    if _client is None and settings.OPENAI_API_KEY:
+        _client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
+    return _client
 
 def transcribe_audio_from_url(url: str, save_path: str = "temp_recording.wav") -> str:
     if not settings.OPENAI_API_KEY:
         return "Transcription unavailable (No API Key)"
+    
+    client = _get_client()
+    if not client:
+        return "Transcription unavailable (Client initialization failed)"
         
     try:
         # 1. Download File
@@ -31,7 +41,7 @@ def transcribe_audio_from_url(url: str, save_path: str = "temp_recording.wav") -
             
         # 2. Transcribe
         with open(save_path, "rb") as audio_file:
-            transcript = client.audio.transcriptions.create(
+            transcript = _get_client().audio.transcriptions.create(
                 model="whisper-1", 
                 file=audio_file,
                 language="en" # Force English as per spec
@@ -50,16 +60,20 @@ def transcribe_audio_from_url(url: str, save_path: str = "temp_recording.wav") -
 def generate_summary(text: str) -> str:
     if not settings.OPENAI_API_KEY:
         return "Summary unavailable (No API Key)"
+    
+    client = _get_client()
+    if not client:
+        return "Summary unavailable (Client initialization failed)"
         
     try:
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {"role": "system", "content": "You are a helpful assistant for a phone repair shop. Summarize the following customer inquiry concisely in English."},
+                {"role": "system", "content": "You are a helpful assistant for a phone repair shop. Summarize the following customer inquiry concisely in English. Include: device type, issue, and any specific requests."},
                 {"role": "user", "content": text}
             ]
         )
         return response.choices[0].message.content
     except Exception as e:
         logger.error(f"Summary error: {e}")
-        return f"Error generation summary: {e}"
+        return f"Error generating summary: {e}"
