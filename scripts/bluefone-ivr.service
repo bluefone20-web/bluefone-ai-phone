@@ -1,0 +1,48 @@
+# Bluefone IVR - systemd service file
+# 
+# Installation:
+#   1. Copy to systemd: sudo cp bluefone-ivr.service /etc/systemd/system/
+#   2. Edit paths below to match your setup
+#   3. Reload: sudo systemctl daemon-reload
+#   4. Enable: sudo systemctl enable bluefone-ivr
+#   5. Start: sudo systemctl start bluefone-ivr
+#   6. Check: sudo systemctl status bluefone-ivr
+#
+# Logs: journalctl -u bluefone-ivr -f
+
+[Unit]
+Description=Bluefone Twilio IVR Service
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+
+# ===== EDIT THESE PATHS =====
+WorkingDirectory=/home/ubuntu/bluefone-ai-phone
+ExecStart=/home/ubuntu/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+EnvironmentFile=/home/ubuntu/bluefone-ai-phone/.env
+# ============================
+
+# Restart policy
+Restart=always
+RestartSec=5
+
+# Resource limits
+LimitNOFILE=65536
+
+# Security hardening (optional but recommended)
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/ubuntu/bluefone-ai-phone
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=bluefone-ivr
+
+[Install]
+WantedBy=multi-user.target

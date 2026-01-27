@@ -1,0 +1,52 @@
+# Bluefone IVR Crontab Configuration
+# 
+# Installation:
+#   1. Edit paths below to match your setup
+#   2. Install: crontab scripts/crontab.example
+#   Or manually: crontab -e
+#
+# ===== EDIT THESE PATHS =====
+VENV_PYTHON=/home/ubuntu/venv/bin/python
+APP_DIR=/home/ubuntu/bluefone-ai-phone
+WATCHDOG_SERVER_URL=http://localhost:8000
+# Optional: Slack webhook for alerts
+# SLACK_WEBHOOK=https://hooks.slack.com/services/xxx/yyy/zzz
+# ============================
+
+# Log output
+MAILTO=""
+
+# ============================================
+# HEALTH CHECK (Every 5 minutes)
+# ============================================
+# Basic: Just check, log to syslog
+*/5 * * * * curl -sf http://localhost:8000/health > /dev/null || logger -t bluefone-watchdog "Health check failed"
+
+# Advanced: With auto-restart on failure
+# */5 * * * * $VENV_PYTHON $APP_DIR/scripts/watchdog.py --restart 2>&1 | logger -t bluefone-watchdog
+
+# With Slack alerts
+# */5 * * * * $VENV_PYTHON $APP_DIR/scripts/watchdog.py --restart --slack-webhook "$SLACK_WEBHOOK" 2>&1 | logger -t bluefone-watchdog
+
+# ============================================
+# CACHE WARMUP (Every 10 minutes)
+# ============================================
+# Keep Sheets cache hot so first call is fast
+*/10 * * * * curl -sf -X POST http://localhost:8000/internal/warmup > /dev/null
+
+# ============================================
+# DAILY MAINTENANCE (Every day at 4 AM)
+# ============================================
+# Clear and re-warm cache, good for picking up sheet changes
+0 4 * * * curl -sf -X POST http://localhost:8000/internal/clear-cache > /dev/null && sleep 2 && curl -sf -X POST http://localhost:8000/internal/warmup > /dev/null
+
+# ============================================
+# LOG ROTATION (Weekly)
+# ============================================
+# Compress old logs
+0 0 * * 0 find /var/log -name "bluefone*.log" -mtime +7 -exec gzip {} \;
+
+# ============================================
+# OPTIONAL: Status report to Slack (Every hour)
+# ============================================
+# 0 * * * * STATUS=$(curl -sf http://localhost:8000/internal/status) && echo "$STATUS" | $VENV_PYTHON -c "import sys,json; d=json.load(sys.stdin); print(f'Uptime: {d[\"uptime\"][\"human\"]}, Calls: {d[\"calls\"][\"total\"]}')" | logger -t bluefone-status

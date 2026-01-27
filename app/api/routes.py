@@ -32,6 +32,12 @@ async def voice_incoming(
     CallSid: Optional[str] = Form(None)
 ):
     """Handle incoming call - returns main menu or off-mode TwiML"""
+    from datetime import datetime
+    
+    # Track call statistics
+    request.app.state.last_call_at = datetime.utcnow()
+    request.app.state.call_count = getattr(request.app.state, 'call_count', 0) + 1
+    
     tenant_id = sheet_service.resolve_tenant_by_phone(To)
     logger.info(f"Incoming call for {tenant_id} from {From} (CallSid: {CallSid})")
     
